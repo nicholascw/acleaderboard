@@ -27,3 +27,8 @@ Nicholas Wang for sure, and all folks in the WeChat group helping the test & deb
 ### Still not working?
 ---
 I may not constantly focusing the issue tab but I would try my best. However I recommend contact me on Telegram: [@nicholascw](https://t.me/nicholascw).
+
+### What? You wanna donation!
+---
+Sure! Feel free to feed me @ my [bilibili live](https://live.bilibili.com/24384)!
+Or you can always buy me a coffee with Alipay to nickwck@foxmail.com!
