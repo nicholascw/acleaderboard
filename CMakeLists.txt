@@ -3,4 +3,4 @@ project(acleaderboard C)
 
 set(CMAKE_C_STANDARD 11)
 
-add_executable(acleaderboard main.c ac_proto.c)
+add_executable(acleaderboard main.c ac_proto.h)
