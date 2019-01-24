@@ -6,11 +6,16 @@
 #include <netdb.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-#include <libmng_types.h>
 #include <signal.h>
 #include <wchar.h>
 #include <endian.h>
-
+#include <stdint.h>
+#include <sys/time.h>
+#include <assert.h>
+#include <pthread.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include "ac_proto.h"
 
 static char sigint_captured = 0;
@@ -55,6 +60,194 @@ void sigint_handler() {
     exit(1);
 }
 
+int conn_udp(int port, char *hostname, struct sockaddr_in *ipaddr) {
+
+    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if(sockfd < 0) {
+        perror("socket");
+    }
+    int optval = 1;
+    // Let them reuse
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t) port);
+    struct hostent *serv = gethostbyname(hostname);
+    if(!serv) {
+        perror("gethostbyname");
+        exit(1);
+    }
+
+    memcpy(&addr.sin_addr.s_addr, serv->h_addr, (size_t) serv->h_length);
+
+    if(ipaddr) {
+        memcpy(ipaddr, &addr, sizeof(*ipaddr));
+    }
+
+    struct timeval tv;
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    return sockfd;
+}
+
+typedef struct payload_ {
+    size_t size;
+    uint8_t *buf;
+} payload_t;
+
+payload_t cmd_set_session_info(uint8_t sess_idx,
+                               wchar_t *server_name,
+                               uint8_t type,
+                               uint32_t laps,
+                               uint32_t time_sec,
+                               uint32_t wait_time_sec) {
+    payload_t ret;
+    ret.buf = malloc(1024);
+    if(!ret.buf) {
+        ret.buf = NULL;
+        ret.size = 0;
+        perror("malloc()");
+        return ret;
+    }
+    uint8_t *curr_ptr = ret.buf;
+    *curr_ptr++ = ACSP_SET_SESSION_INFO;
+    *curr_ptr++ = sess_idx;
+    size_t server_len = wcslen(server_name);
+    if(server_len > 0xff) {
+        free(ret.buf);
+        ret.buf = NULL;
+        ret.size = 0;
+        return ret;
+    }
+    *curr_ptr++ = (uint8_t) server_len;
+    memmove(curr_ptr, server_name, server_len * sizeof(wchar_t));
+    curr_ptr += server_len * sizeof(wchar_t);
+    *curr_ptr++ = type;
+    memmove(curr_ptr, &laps, sizeof(uint32_t));
+    curr_ptr += sizeof(uint32_t);
+    memmove(curr_ptr, &time_sec, sizeof(uint32_t));
+    curr_ptr += sizeof(uint32_t);
+    memmove(curr_ptr, &wait_time_sec, sizeof(uint32_t));
+    curr_ptr += sizeof(uint32_t);
+    ret.size = curr_ptr - ret.buf + 1;
+    return ret;
+}
+
+payload_t cmd_get_session_info() {
+    payload_t ret;
+    ret.size = 3;
+    ret.buf = malloc(3);
+    if(!ret.buf) {
+        ret.buf = NULL;
+        ret.size = 0;
+        perror("malloc()");
+        return ret;
+    }
+    ret.buf[0] = ACSP_GET_SESSION_INFO;
+    ret.buf[1] = 0xff;
+    ret.buf[2] = 0xff;
+    return ret;
+}
+
+payload_t cmd_get_car_info(uint8_t car_id) {
+    payload_t ret;
+    ret.size = 2;
+    ret.buf = malloc(2);
+    if(!ret.buf) {
+        ret.buf = NULL;
+        ret.size = 0;
+        perror("malloc()");
+        return ret;
+    }
+    ret.buf[0] = ACSP_GET_CAR_INFO;
+    ret.buf[1] = car_id;
+    return ret;
+}
+
+payload_t cmd_enable_realtime_report(uint16_t interval_ms) {
+    payload_t ret;
+    ret.size = 3;
+    ret.buf = malloc(3);
+    if(!ret.buf) {
+        ret.buf = NULL;
+        ret.size = 0;
+        perror("malloc()");
+        return ret;
+    }
+    ret.buf[0] = ACSP_REALTIMEPOS_INTERVAL;
+    *((uint16_t *) (ret.buf + 1)) = interval_ms;
+    return ret;
+}
+
+payload_t cmd_send_chat(uint8_t car_id, wchar_t *msg) {
+    payload_t ret;
+    ret.buf = malloc(1024);
+    if(!ret.buf) {
+        ret.buf = NULL;
+        ret.size = 0;
+        perror("malloc()");
+        return ret;
+    }
+    ret.buf[0] = ACSP_SEND_CHAT;
+    ret.buf[1] = car_id;
+    size_t msg_len = wcslen(msg);
+    if(msg_len > 0xff) {
+        free(ret.buf);
+        ret.buf = NULL;
+        ret.size = 0;
+        fprintf(stderr, "Message too long!\n");
+        return ret;
+    }
+    ret.buf[2] = (uint8_t) msg_len;
+    memmove(ret.buf + 3, msg, msg_len * sizeof(wchar_t));
+    ret.size = 3 + sizeof(wchar_t) * msg_len;
+    return ret;
+}
+
+payload_t cmd_broadcast_chat(wchar_t *msg) {
+    payload_t ret;
+    ret.buf = malloc(1024);
+    if(!ret.buf) {
+        ret.buf = NULL;
+        ret.size = 0;
+        perror("malloc()");
+        return ret;
+    }
+    ret.buf[0] = ACSP_BROADCAST_CHAT;
+    size_t msg_len = wcslen(msg);
+    if(msg_len > 0xff) {
+        free(ret.buf);
+        ret.buf = NULL;
+        ret.size = 0;
+        fprintf(stderr, "Message too long!\n");
+        return ret;
+    }
+    ret.buf[1] = (uint8_t) msg_len;
+    memmove(ret.buf + 2, msg, msg_len * sizeof(wchar_t));
+    ret.size = 2 + sizeof(wchar_t) * msg_len;
+    return ret;
+}
+
+payload_t cmd_kick(uint8_t user_id) {
+    payload_t ret;
+    ret.buf = malloc(2);
+    if(!ret.buf) {
+        ret.buf = NULL;
+        ret.size = 0;
+        perror("malloc()");
+        return ret;
+    }
+    ret.size = 2;
+    ret.buf[0] = ACSP_KICK_USER;
+    ret.buf[1] = user_id;
+    return ret;
+}
+
+
 int main() {
     signal(SIGINT, sigint_handler);
     fprintf(stderr, "┌──────────────────────────────────────────┐\n"
@@ -71,12 +264,13 @@ int main() {
     hints.ai_flags = AI_PASSIVE;
     getaddrinfo("localhost", "12000", &hints, &res);
     int sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &(int) {1}, sizeof(int));
     if(bind(sockfd, res->ai_addr, res->ai_addrlen)) {
         perror("bind() failed! check if another instance is already started, or other plugins are occupying port 12000");
         exit(1);
     }
-
+    struct sockaddr_in ac_recv_addr; // ac's "LOCAL PORT" to be sent with commands
+    int sendfd = conn_udp(11000, "localhost", &ac_recv_addr);
     struct sockaddr addr;
     socklen_t addr_len = sizeof(addr);
     uint8_t *packet = malloc(2048);
